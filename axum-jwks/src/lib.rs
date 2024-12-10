@@ -88,6 +88,7 @@
 //! }
 //! ```
 
+mod algorithms;
 mod claims;
 mod jwks;
 mod token;

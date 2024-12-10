@@ -2,14 +2,14 @@ use std::{collections::HashMap, str::FromStr};
 
 use jsonwebtoken::{
     decode, decode_header,
-    jwk::{self, AlgorithmParameters},
+    jwk::{self, AlgorithmParameters, KeyAlgorithm},
     DecodingKey, TokenData, Validation,
 };
 use serde::{de::DeserializeOwned, Deserialize};
 use thiserror::Error;
 use tracing::{debug, info};
 
-use crate::TokenError;
+use crate::{algorithms::try_get_supported_algorithm, TokenError};
 
 /// A container for a set of JWT decoding keys.
 ///
@@ -110,11 +110,13 @@ impl Jwks {
                                 error: err,
                             }
                         })?;
-                    let mut validation = Validation::new(jwk.common.algorithm.or(alg).ok_or(
-                        JwkError::MissingAlgorithm {
-                            key_id: kid.clone(),
-                        },
-                    )?);
+                        let key_algo = jwk.common.key_algorithm.ok_or(
+                            JwkError::MissingAlgorithm {
+                                key_id: kid.clone(),
+                            },
+                        )?;
+                    let algorithm = try_get_supported_algorithm(key_algo)?;
+                    let mut validation = Validation::new(algorithm);
                     if let Some(audience) = audience {
                         validation.set_audience(&[audience.to_string()]);
                     }
@@ -127,6 +129,38 @@ impl Jwks {
                         },
                     );
                 }
+                jwk::AlgorithmParameters::EllipticCurve(ec) => {
+                    let decoding_key = match ec.curve {
+                        jwk::EllipticCurve::P256 => DecodingKey::from_ec_components(&ec.x, &ec.y),
+                        jwk::EllipticCurve::P384 => DecodingKey::from_ec_components(&ec.x, &ec.y),
+                        jwk::EllipticCurve::P521 => DecodingKey::from_ec_components(&ec.x, &ec.y),
+                        jwk::EllipticCurve::Ed25519 => DecodingKey::from_ed_components(&ec.x),
+                    }.map_err(|err| {
+                        JwkError::DecodingError {
+                            key_id: kid.clone(),
+                            error: err,
+                        }
+                    })?;
+                    
+                    let key_algo = jwk.common.key_algorithm.ok_or(
+                        JwkError::MissingAlgorithm {
+                            key_id: kid.clone(),
+                        },
+                    )?;
+                    let algorithm = try_get_supported_algorithm(key_algo)?;
+                    let mut validation = Validation::new(algorithm);
+                    if let Some(audience) = audience {
+                        validation.set_audience(&[audience.to_string()]);
+                    }
+
+                    keys.insert(
+                        kid,
+                        Jwk {
+                            decoding: decoding_key,
+                            validation,
+                        },
+                    );
+                },
                 other => {
                     return Err(JwkError::UnexpectedAlgorithm {
                         key_id: kid,
@@ -219,5 +253,10 @@ pub enum JwkError {
     UnexpectedAlgorithm {
         algorithm: AlgorithmParameters,
         key_id: String,
+    },
+
+    #[error("unsupported algorithm {algorithm:?}")]
+    UnsupportedAlgorithm {
+        algorithm: KeyAlgorithm
     },
 }
